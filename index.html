@@ -1,0 +1,860 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Wobbly Towers</title>
+<style>
+  :root {
+    --ink: #3a3530;
+    --paper: #f6f1e3;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--paper);
+    font-family: "Comic Sans MS", "Chalkboard SE", "Segoe Print", cursive;
+    color: var(--ink);
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  #game-wrap {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas { display: block; background: var(--paper); }
+
+  /* ---------- HUD ---------- */
+  #hud {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 14px;
+    font-size: 15px;
+    pointer-events: none;
+  }
+  #hud div { white-space: nowrap; }
+  #banner {
+    position: absolute;
+    top: 18%;
+    width: 100%;
+    text-align: center;
+    font-size: 30px;
+    font-weight: bold;
+    text-shadow: 2px 2px 0 #fff;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.3s;
+    transform: rotate(-2deg);
+  }
+  #banner.show { opacity: 1; }
+
+  /* ---------- controls ---------- */
+  #controls {
+    position: absolute;
+    bottom: 12px;
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    gap: 14px;
+    pointer-events: none;
+  }
+  #controls button {
+    pointer-events: auto;
+    font-family: inherit;
+    font-size: 20px;
+    padding: 10px 18px;
+    background: #fffdf5;
+    color: var(--ink);
+    border: 2.5px solid var(--ink);
+    border-radius: 12px 18px 14px 16px / 16px 12px 18px 14px; /* wonky hand-drawn border */
+    box-shadow: 2px 3px 0 rgba(58,53,48,0.4);
+    cursor: pointer;
+    transform: rotate(-1deg);
+  }
+  #controls button:nth-child(2) { transform: rotate(1.2deg); }
+  #controls button:active { transform: translateY(2px); box-shadow: none; }
+  #controls.hidden { display: none; }
+
+  /* ---------- overlays ---------- */
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: rgba(246, 241, 227, 0.93);
+    text-align: center;
+    padding: 20px;
+    z-index: 10;
+  }
+  .overlay.hidden { display: none; }
+  .overlay h1 {
+    font-size: 42px;
+    transform: rotate(-2deg);
+    margin-bottom: 6px;
+  }
+  .overlay h2 { font-size: 28px; transform: rotate(-1.5deg); }
+  .overlay p { font-size: 16px; margin: 10px 0; max-width: 340px; }
+  .overlay .scores {
+    margin: 12px 0;
+    font-size: 18px;
+    line-height: 1.7;
+  }
+  .overlay button {
+    font-family: inherit;
+    font-size: 24px;
+    padding: 12px 34px;
+    margin-top: 14px;
+    background: #ffd76e;
+    color: var(--ink);
+    border: 3px solid var(--ink);
+    border-radius: 14px 20px 12px 18px / 18px 12px 20px 14px;
+    box-shadow: 3px 4px 0 rgba(58,53,48,0.4);
+    cursor: pointer;
+    transform: rotate(-1deg);
+  }
+  .overlay button:active { transform: translateY(2px) rotate(-1deg); box-shadow: none; }
+  .small-note { font-size: 12px; opacity: 0.65; margin-top: 16px; }
+</style>
+</head>
+<body>
+<div id="game-wrap">
+  <canvas id="canvas"></canvas>
+
+  <div id="hud">
+    <div id="hud-left"></div>
+    <div id="hud-right"></div>
+  </div>
+  <div id="banner"></div>
+
+  <div id="controls" class="hidden">
+    <button id="btn-ccw">&#10226;</button>
+    <button id="btn-cw">&#10227;</button>
+    <button id="btn-drop">Drop!</button>
+  </div>
+
+  <div id="start-overlay" class="overlay">
+    <h1>Wobbly Towers</h1>
+    <p>Stack tetromino blocks on a tiny platform, then survive
+       10 waves of wind, earthquakes and cannonballs!</p>
+    <p><b>Drag</b> to move &middot; <b>scroll / R</b> or buttons to rotate &middot;
+       drop before the timer runs out!</p>
+    <div class="scores" id="start-scores"></div>
+    <button id="btn-start">Play</button>
+    <div class="small-note">works offline &middot; physics by matter.js</div>
+  </div>
+
+  <div id="end-overlay" class="overlay hidden">
+    <h1 id="end-title"></h1>
+    <h2 id="end-score"></h2>
+    <p id="end-detail"></p>
+    <div class="scores" id="end-scores"></div>
+    <button id="btn-again">Play again</button>
+  </div>
+</div>
+
+<script src="matter.min.js"></script>
+<script>
+"use strict";
+
+/* ============================================================
+   CONFIG - tweak the game feel here
+   ============================================================ */
+const CONFIG = {
+  BLOCKS_TO_PLACE : 8,      // blocks the player stacks before waves start
+  MAX_WAVES       : 10,     // survive this many waves to win
+  PLACE_TIME_S    : 10,     // seconds to position each block
+  PLATFORM_WIDTH  : 170,    // px, the narrow platform
+  PLATFORM_HEIGHT : 22,
+  MIN_TOWER_PX    : 70,     // game over when tower drops below this height
+  PX_PER_METER    : 50,     // purely cosmetic, for the height display
+  BLOCK_STYLE     : "tetromino", // "tetromino" or "crooked"
+  TETRO_CELL      : 30,     // px size of one tetromino cell
+  BLOCK_MIN_R     : 40,     // crooked-style size range (radius of generating circle)
+  BLOCK_MAX_R     : 48,
+  WAVE_DURATION_S : 6,      // active part of each wave
+  SETTLE_AFTER_S  : 2.5,    // calm-down time after a wave before scoring
+  HIGHSCORE_KEY   : "wobblyTowersTop3",
+};
+
+/* ============================================================
+   SETUP
+   ============================================================ */
+const { Engine, Body, Bodies, Composite, Vertices, Events, Vector, Query } = Matter;
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+// Logical playfield; scaled to fit the window (portrait, bus-friendly)
+const W = 420, H = 700;
+let viewScale = 1;
+
+function resize() {
+  viewScale = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.width  = Math.round(W * viewScale * devicePixelRatio);
+  canvas.height = Math.round(H * viewScale * devicePixelRatio);
+  canvas.style.width  = (W * viewScale) + "px";
+  canvas.style.height = (H * viewScale) + "px";
+}
+window.addEventListener("resize", resize);
+resize();
+
+const engine = Engine.create();
+engine.gravity.y = 1;
+
+// Platform: a narrow ledge floating above the bottom of the screen
+const PLATFORM_Y = H - 120;
+const platformBaseX = W / 2;
+const platform = Bodies.rectangle(
+  platformBaseX, PLATFORM_Y,
+  CONFIG.PLATFORM_WIDTH, CONFIG.PLATFORM_HEIGHT,
+  // matter combines frictionStatic between touching bodies with max(),
+  // so a grippy platform holds blocks firmly - and shakes them properly
+  { isStatic: true, friction: 1.0, frictionStatic: 10, label: "platform" }
+);
+// A thin pillar under the platform, just for looks (also static)
+const pillar = Bodies.rectangle(
+  platformBaseX, PLATFORM_Y + 60, 26, 120,
+  { isStatic: true, label: "pillar" }
+);
+Composite.add(engine.world, [platform, pillar]);
+
+const KILL_Y = H + 80;            // bodies below this are lost
+const PLATFORM_TOP = PLATFORM_Y - CONFIG.PLATFORM_HEIGHT / 2;
+
+/* ============================================================
+   GAME STATE
+   ============================================================ */
+const PHASE = { MENU:0, PLACING:1, SETTLING:2, WAVE_ANNOUNCE:3, WAVE_ACTIVE:4, WAVE_SETTLE:5, OVER:6 };
+
+let state = {};
+function freshState() {
+  return {
+    phase: PHASE.MENU,
+    blocksPlaced: 0,
+    placedBlocks: [],        // bodies that are part of the tower
+    currentBlock: null,
+    placeDeadline: 0,
+    settleQuietSince: null,
+    wave: 0,
+    waveType: null,
+    waveEndsAt: 0,
+    waveSettleEndsAt: 0,
+    score: 0,
+    balls: [],
+    windDir: 1,
+    windPhase: 0,
+    gameOverReason: "",
+    won: false,
+  };
+}
+state = freshState();
+
+/* ============================================================
+   SKETCHY RENDERING HELPERS
+   The "boiling" wobble: every body gets per-vertex jitter that
+   is regenerated a few times per second, like a hand redrawing.
+   ============================================================ */
+const wobbleCache = new Map();   // body.id -> {offsets, until}
+function getWobble(body, nVerts) {
+  let w = wobbleCache.get(body.id);
+  if (!w || w.until < performance.now() || w.offsets.length < nVerts * 2) {
+    const offsets = [];
+    for (let i = 0; i < nVerts * 2; i++) offsets.push((Math.random() - 0.5) * 3);
+    w = { offsets, until: performance.now() + 180 };
+    wobbleCache.set(body.id, w);
+  }
+  return w.offsets;
+}
+
+function sketchPath(verts, off, pass) {
+  ctx.beginPath();
+  for (let i = 0; i < verts.length; i++) {
+    const j = (i + pass) % verts.length; // second pass starts elsewhere, looks hand-traced
+    const x = verts[j].x + off[(j * 2) % off.length] * (pass ? -1 : 1);
+    const y = verts[j].y + off[(j * 2 + 1) % off.length] * (pass ? -1 : 1);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+function drawSketchBody(body, fill, lineWidth = 2.2) {
+  const verts = body.vertices;
+  const off = getWobble(body, verts.length);
+  ctx.fillStyle = fill;
+  sketchPath(verts, off, 0);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(58,53,48,0.9)";
+  ctx.lineWidth = lineWidth;
+  ctx.lineJoin = "round";
+  ctx.stroke();
+  // second, lighter trace for the hand-drawn double-line feel
+  ctx.strokeStyle = "rgba(58,53,48,0.35)";
+  ctx.lineWidth = 1.2;
+  sketchPath(verts, off, 1);
+  ctx.stroke();
+}
+
+const BLOCK_COLORS = [
+  "rgba(239,131,122,0.75)", "rgba(122,177,239,0.75)", "rgba(247,206,91,0.8)",
+  "rgba(142,206,144,0.75)", "rgba(206,142,222,0.75)", "rgba(244,166,98,0.8)",
+];
+
+/* ============================================================
+   RANDOM CROOKED SHAPES
+   Start from a 3-6 sided polygon, jitter radius and angle,
+   take the convex hull so matter.js handles it cleanly.
+   ============================================================ */
+function randomShape(x, y) {
+  const sides = 3 + Math.floor(Math.random() * 4);          // 3..6
+  const baseR = CONFIG.BLOCK_MIN_R + Math.random() * (CONFIG.BLOCK_MAX_R - CONFIG.BLOCK_MIN_R);
+  // squash one axis so we get rectangles / slabs, not just blobs
+  // (floors raised so no block dimension can collapse into a sliver)
+  const squashX = 0.75 + Math.random() * 0.65;
+  const squashY = 0.75 + Math.random() * 0.65;
+  const pts = [];
+  for (let i = 0; i < sides; i++) {
+    const ang = (i / sides) * Math.PI * 2 + (Math.random() - 0.5) * (Math.PI / sides);
+    const r = baseR * (0.8 + Math.random() * 0.4);
+    pts.push({ x: Math.cos(ang) * r * squashX, y: Math.sin(ang) * r * squashY });
+  }
+  const hull = Vertices.hull(pts.map(p => ({ x: p.x, y: p.y })));
+  const body = Bodies.fromVertices(x, y, [hull], {
+    friction: 0.9,
+    frictionStatic: 1.0,
+    restitution: 0.02,
+    density: 0.0014,
+    label: "block",
+  }, true);
+  body.renderFill = BLOCK_COLORS[Math.floor(Math.random() * BLOCK_COLORS.length)];
+  return body;
+}
+
+/* ============================================================
+   TETROMINO SHAPES
+   Built as compound bodies (one square part per cell) so the
+   concave shapes (L, T, S, Z, J) collide correctly.
+   ============================================================ */
+const TETROMINO_SHAPES = {
+  I: [[0,0],[1,0],[2,0],[3,0]],
+  O: [[0,0],[1,0],[0,1],[1,1]],
+  T: [[0,0],[1,0],[2,0],[1,1]],
+  S: [[1,0],[2,0],[0,1],[1,1]],
+  Z: [[0,0],[1,0],[1,1],[2,1]],
+  J: [[0,0],[0,1],[1,1],[2,1]],
+  L: [[2,0],[0,1],[1,1],[2,1]],
+};
+
+function randomTetromino(x, y) {
+  const names = Object.keys(TETROMINO_SHAPES);
+  const cells = TETROMINO_SHAPES[names[Math.floor(Math.random() * names.length)]];
+  const c = CONFIG.TETRO_CELL;
+  const opts = {
+    friction: 0.9,
+    frictionStatic: 1.0,
+    restitution: 0.02,
+    density: 0.0014,
+    label: "block",
+  };
+  const parts = cells.map(([cx, cy]) => Bodies.rectangle(cx * c, cy * c, c, c, opts));
+  const body = Body.create({ parts, ...opts });
+  Body.setPosition(body, { x, y });
+  body.renderFill = BLOCK_COLORS[Math.floor(Math.random() * BLOCK_COLORS.length)];
+  return body;
+}
+
+function makeBlock(x, y) {
+  return CONFIG.BLOCK_STYLE === "tetromino" ? randomTetromino(x, y) : randomShape(x, y);
+}
+
+// compound bodies keep their outline parts in parts[1..]; simple bodies are their own part
+function solidParts(body) {
+  return body.parts.length > 1 ? body.parts.slice(1) : [body];
+}
+
+/* ============================================================
+   PLACEMENT (drag, rotate, timer)
+   ============================================================ */
+function setGhost(block, ghost) {
+  // collision filters live on every part of a compound body
+  for (const part of block.parts) part.collisionFilter.mask = ghost ? 0 : -1;
+  block.isGhost = ghost;
+}
+
+function spawnBlock() {
+  const block = makeBlock(W / 2, 90);
+  Body.setStatic(block, true);
+  // while being placed the block is a "ghost": it collides with nothing,
+  // so dragging it through your tower can never knock it over
+  setGhost(block, true);
+  state.currentBlock = block;
+  state.placeDeadline = performance.now() + CONFIG.PLACE_TIME_S * 1000;
+  Composite.add(engine.world, block);
+  state.phase = PHASE.PLACING;
+  controls.classList.remove("hidden");
+}
+
+function currentBlockOverlaps() {
+  if (!state.currentBlock) return false;
+  const solids = [platform, ...state.placedBlocks.filter(b => b.position.y < KILL_Y)];
+  // check part-vs-part so compound tetrominoes are handled correctly
+  for (const a of solidParts(state.currentBlock)) {
+    for (const s of solids) {
+      for (const b of solidParts(s)) {
+        if (Matter.Bounds.overlaps(a.bounds, b.bounds) &&
+            Matter.Collision.collides(a, b)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function dropCurrentBlock() {
+  if (state.phase !== PHASE.PLACING || !state.currentBlock) return;
+  const block = state.currentBlock;
+  // lift the ghost out of any overlap, so turning collisions back on
+  // can never make blocks explode apart
+  let guard = 0;
+  while (currentBlockOverlaps() && guard++ < 200) {
+    Body.setPosition(block, { x: block.position.x, y: block.position.y - 4 });
+  }
+  setGhost(block, false);            // solid again
+  Body.setStatic(block, false);
+  Body.setVelocity(block, { x: 0, y: 0 });
+  state.placedBlocks.push(block);
+  state.currentBlock = null;
+  state.phase = PHASE.SETTLING;
+  state.settleQuietSince = null;
+  state.settleTimeout = performance.now() + 5000;
+  controls.classList.add("hidden");
+}
+
+function rotateCurrent(deltaRad) {
+  if (state.phase === PHASE.PLACING && state.currentBlock) {
+    Body.setAngle(state.currentBlock, state.currentBlock.angle + deltaRad);
+  }
+}
+
+// pointer input
+let dragging = false;
+function canvasPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) / viewScale,
+    y: (e.clientY - rect.top) / viewScale,
+  };
+}
+canvas.addEventListener("pointerdown", e => {
+  if (state.phase !== PHASE.PLACING) return;
+  dragging = true;
+  canvas.setPointerCapture(e.pointerId);
+  moveBlockTo(canvasPos(e));
+});
+canvas.addEventListener("pointermove", e => {
+  if (dragging && state.phase === PHASE.PLACING) moveBlockTo(canvasPos(e));
+});
+canvas.addEventListener("pointerup", () => { dragging = false; });
+canvas.addEventListener("wheel", e => {
+  e.preventDefault();
+  rotateCurrent(e.deltaY > 0 ? 0.12 : -0.12);
+}, { passive: false });
+// buttons and R/E snap tetrominoes by 90 degrees; the wheel still fine-tunes
+const ROTATE_STEP = CONFIG.BLOCK_STYLE === "tetromino" ? Math.PI / 2 : 0.25;
+window.addEventListener("keydown", e => {
+  if (e.key === "r" || e.key === "ArrowRight") rotateCurrent(ROTATE_STEP);
+  if (e.key === "e" || e.key === "ArrowLeft") rotateCurrent(-ROTATE_STEP);
+  if (e.key === " " || e.key === "Enter") dropCurrentBlock();
+});
+
+function moveBlockTo(p) {
+  if (!state.currentBlock) return;
+  const x = Math.max(30, Math.min(W - 30, p.x));
+  const y = Math.max(50, Math.min(PLATFORM_TOP - 30, p.y));
+  Body.setPosition(state.currentBlock, { x, y });
+}
+
+const controls = document.getElementById("controls");
+document.getElementById("btn-ccw").addEventListener("click", () => rotateCurrent(-ROTATE_STEP));
+document.getElementById("btn-cw").addEventListener("click", () => rotateCurrent(ROTATE_STEP));
+document.getElementById("btn-drop").addEventListener("click", dropCurrentBlock);
+
+/* ============================================================
+   TOWER MEASUREMENT
+   ============================================================ */
+function towerHeightPx() {
+  let top = PLATFORM_TOP;
+  for (const b of state.placedBlocks) {
+    if (b.position.y > KILL_Y) continue;                       // fell off
+    if (b.position.y > PLATFORM_TOP + 40) continue;            // tumbled below the ledge
+    top = Math.min(top, b.bounds.min.y);                       // bounds cover all parts
+  }
+  return Math.max(0, PLATFORM_TOP - top);
+}
+const px2m = px => (px / CONFIG.PX_PER_METER).toFixed(2);
+
+/* ============================================================
+   DISASTER WAVES
+   ============================================================ */
+const WAVE_TYPES = [
+  { id: "wind",  name: "Gusty Wind",  emoji: "🌬️" },
+  { id: "quake", name: "Earthquake",  emoji: "🌋" },
+  { id: "balls", name: "Cannonballs", emoji: "⚫" },
+];
+
+function startWave() {
+  state.wave++;
+  state.waveType = WAVE_TYPES[Math.floor(Math.random() * WAVE_TYPES.length)];
+  state.phase = PHASE.WAVE_ANNOUNCE;
+  state.waveAnnounceEndsAt = performance.now() + 1600;
+  showBanner(`Wave ${state.wave}: ${state.waveType.name} ${state.waveType.emoji}`);
+}
+
+function activateWave() {
+  state.phase = PHASE.WAVE_ACTIVE;
+  state.waveEndsAt = performance.now() + CONFIG.WAVE_DURATION_S * 1000;
+  state.windDir = Math.random() < 0.5 ? -1 : 1;
+  state.windPhase = 0;
+  state.nextBallAt = performance.now() + 400;
+  // difficulty 0..1 across all waves
+  state.intensity = state.wave / CONFIG.MAX_WAVES;
+}
+
+function waveTick(dtMs) {
+  const t = performance.now();
+  const k = state.intensity;
+
+  if (state.waveType.id === "wind") {
+    // gusts: sine envelope with random direction flips
+    state.windPhase += dtMs / 1000;
+    if (Math.random() < 0.004) state.windDir *= -1;
+    const gust = Math.max(0, Math.sin(state.windPhase * 2.2));
+    // express wind as a fraction of gravity so it stays fair:
+    // peak gust ~0.2x gravity in wave 1, ramping to ~0.5x in wave 10
+    // (tested: an average tower survives to ~wave 5-6, late waves are deadly)
+    const GRAVITY_FORCE_PER_MASS = 0.001; // matter.js default gravity scale
+    const strength = GRAVITY_FORCE_PER_MASS * (0.15 + k * 0.35) * gust;
+    for (const b of state.placedBlocks) {
+      if (b.position.y < KILL_Y) {
+        Body.applyForce(b, b.position, { x: state.windDir * strength * b.mass, y: 0 });
+      }
+    }
+    state.windGust = gust; // for rendering streaks
+  }
+
+  if (state.waveType.id === "quake") {
+    // pass updateVelocity=true so the platform's motion is transmitted
+    // through friction to the blocks (a teleporting platform has zero
+    // velocity and shakes nothing). Curve tested: a sturdy tower survives
+    // early quakes, wave 10 levels it.
+    const amp = 2 + k * 6;
+    const freq = 1 + k * 1.4;
+    const offset = Math.sin(t / 1000 * freq * Math.PI) * amp;
+    Body.setPosition(platform, { x: platformBaseX + offset, y: PLATFORM_Y }, true);
+    Body.setPosition(pillar, { x: platformBaseX + offset, y: PLATFORM_Y + 60 });
+  }
+
+  if (state.waveType.id === "balls" && t > state.nextBallAt) {
+    const interval = 1800 - k * 1100;
+    state.nextBallAt = t + interval;
+    const fromLeft = Math.random() < 0.5;
+    const r = 8 + Math.random() * 6 + k * 6;
+    const startX = fromLeft ? -20 : W + 20;
+    const startY = PLATFORM_TOP - 40 - Math.random() * Math.min(280, towerHeightPx() + 80);
+    const ball = Bodies.circle(startX, startY, r, {
+      density: 0.002 + k * 0.002, restitution: 0.4, label: "ball",
+    });
+    const speed = 7 + k * 8;
+    Body.setVelocity(ball, { x: fromLeft ? speed : -speed, y: -1 - Math.random() * 2 });
+    ball.renderFill = "rgba(70,65,60,0.85)";
+    state.balls.push(ball);
+    Composite.add(engine.world, ball);
+  }
+}
+
+function endWaveCleanup() {
+  // earthquake: put the platform home and clear its leftover shake velocity.
+  // Without this the static platform keeps a stale velocity and friction
+  // drags blocks sideways like a conveyor belt, long after the quake ends.
+  Body.setPosition(platform, { x: platformBaseX, y: PLATFORM_Y });
+  Body.setVelocity(platform, { x: 0, y: 0 });
+  Body.setPosition(pillar, { x: platformBaseX, y: PLATFORM_Y + 60 });
+  // cannonballs roll away
+  for (const ball of state.balls) Composite.remove(engine.world, ball);
+  state.balls = [];
+}
+
+function scoreWave() {
+  const h = towerHeightPx();
+  const gained = Math.round((h / 10) * state.wave * 10);
+  state.score += gained;
+  showBanner(`+${gained} pts  (${px2m(h)} m standing)`);
+  if (h < CONFIG.MIN_TOWER_PX) {
+    gameOver(false, `Your tower crumbled in wave ${state.wave}.`);
+  } else if (state.wave >= CONFIG.MAX_WAVES) {
+    state.score += 500; // survival bonus
+    gameOver(true, "Your tower survived all " + CONFIG.MAX_WAVES + " waves! +500 bonus");
+  } else {
+    setTimeout(() => { if (state.phase !== PHASE.OVER) startWave(); }, 1400);
+  }
+}
+
+/* ============================================================
+   GAME OVER + HIGHSCORES
+   ============================================================ */
+function loadScores() {
+  try { return JSON.parse(localStorage.getItem(CONFIG.HIGHSCORE_KEY)) || []; }
+  catch { return []; }
+}
+function saveScore(score) {
+  const scores = loadScores();
+  scores.push({ score, date: new Date().toLocaleDateString() });
+  scores.sort((a, b) => b.score - a.score);
+  const top3 = scores.slice(0, 3);
+  // storage can be unavailable (private mode, file:// quirks); the game must not crash
+  try { localStorage.setItem(CONFIG.HIGHSCORE_KEY, JSON.stringify(top3)); } catch {}
+  return top3;
+}
+function scoresHtml(list, highlight) {
+  if (!list.length) return "<i>no scores yet - be the first!</i>";
+  const medals = ["🥇", "🥈", "🥉"];
+  return list.map((s, i) =>
+    `${medals[i]} ${s.score} pts <span style="opacity:.55;font-size:13px">${s.date}</span>` +
+    (highlight === s ? " &larr; new!" : "")
+  ).join("<br>");
+}
+
+function gameOver(won, reason) {
+  state.phase = PHASE.OVER;
+  state.won = won;
+  controls.classList.add("hidden");
+  const entry = { score: state.score, date: new Date().toLocaleDateString() };
+  const top3 = saveScore(state.score);
+  const isTop = top3.some(s => s.score === state.score && s.date === entry.date);
+  document.getElementById("end-title").textContent = won ? "You survived! 🏆" : "Tower down! 💥";
+  document.getElementById("end-score").textContent = state.score + " points";
+  document.getElementById("end-detail").textContent = reason;
+  document.getElementById("end-scores").innerHTML =
+    "<b>Best towers</b><br>" + scoresHtml(top3, isTop ? top3.find(s => s.score === state.score) : null);
+  document.getElementById("end-overlay").classList.remove("hidden");
+}
+
+function resetGame() {
+  // remove everything except platform + pillar
+  for (const b of [...Composite.allBodies(engine.world)]) {
+    if (b !== platform && b !== pillar) Composite.remove(engine.world, b);
+  }
+  Body.setPosition(platform, { x: platformBaseX, y: PLATFORM_Y });
+  Body.setPosition(pillar, { x: platformBaseX, y: PLATFORM_Y + 60 });
+  state = freshState();
+}
+
+document.getElementById("btn-start").addEventListener("click", () => {
+  document.getElementById("start-overlay").classList.add("hidden");
+  resetGame();
+  spawnBlock();
+});
+document.getElementById("btn-again").addEventListener("click", () => {
+  document.getElementById("end-overlay").classList.add("hidden");
+  resetGame();
+  spawnBlock();
+});
+document.getElementById("start-scores").innerHTML =
+  "<b>Best towers</b><br>" + scoresHtml(loadScores(), null);
+
+/* ============================================================
+   BANNER + HUD
+   ============================================================ */
+const banner = document.getElementById("banner");
+let bannerTimer = null;
+function showBanner(text, ms = 1500) {
+  banner.innerHTML = text;
+  banner.classList.add("show");
+  clearTimeout(bannerTimer);
+  bannerTimer = setTimeout(() => banner.classList.remove("show"), ms);
+}
+
+function updateHud() {
+  const left = document.getElementById("hud-left");
+  const right = document.getElementById("hud-right");
+  right.textContent = `score ${state.score}`;
+  if (state.phase === PHASE.PLACING) {
+    const remain = Math.max(0, (state.placeDeadline - performance.now()) / 1000);
+    left.textContent = `block ${state.blocksPlaced + 1}/${CONFIG.BLOCKS_TO_PLACE} · ${remain.toFixed(1)}s`;
+  } else if (state.phase >= PHASE.WAVE_ANNOUNCE && state.phase <= PHASE.WAVE_SETTLE) {
+    left.textContent = `wave ${state.wave}/${CONFIG.MAX_WAVES} · ${px2m(towerHeightPx())} m`;
+  } else if (state.phase === PHASE.SETTLING) {
+    left.textContent = "settling…";
+  } else {
+    left.textContent = "";
+  }
+}
+
+/* ============================================================
+   SETTLE DETECTION
+   ============================================================ */
+function allQuiet() {
+  for (const b of state.placedBlocks) {
+    if (b.position.y > KILL_Y) continue;
+    if (b.speed > 0.18 || Math.abs(b.angularSpeed) > 0.04) return false;
+  }
+  return true;
+}
+
+/* ============================================================
+   MAIN LOOP
+   ============================================================ */
+let lastT = performance.now();
+function loop(now) {
+  const dt = Math.min(32, now - lastT);
+  lastT = now;
+
+  // --- phase logic ---
+  if (state.phase === PHASE.PLACING) {
+    if (now > state.placeDeadline) dropCurrentBlock();
+  } else if (state.phase === PHASE.SETTLING) {
+    if (allQuiet()) {
+      if (state.settleQuietSince === null) state.settleQuietSince = now;
+    } else state.settleQuietSince = null;
+    if ((state.settleQuietSince && now - state.settleQuietSince > 600) || now > state.settleTimeout) {
+      state.blocksPlaced++;
+      if (state.blocksPlaced >= CONFIG.BLOCKS_TO_PLACE) {
+        const h = towerHeightPx();
+        state.score += Math.round(h);            // build bonus: 1pt per px of height
+        showBanner(`Tower built: ${px2m(h)} m! Brace yourself…`, 1800);
+        setTimeout(() => { if (state.phase !== PHASE.OVER) startWave(); }, 1900);
+        state.phase = PHASE.WAVE_ANNOUNCE;       // placeholder until startWave fires
+        state.waveAnnounceEndsAt = Infinity;
+      } else {
+        spawnBlock();
+      }
+    }
+  } else if (state.phase === PHASE.WAVE_ANNOUNCE) {
+    if (now > state.waveAnnounceEndsAt) activateWave();
+  } else if (state.phase === PHASE.WAVE_ACTIVE) {
+    waveTick(dt);
+    if (now > state.waveEndsAt) {
+      endWaveCleanup();
+      state.phase = PHASE.WAVE_SETTLE;
+      state.waveSettleEndsAt = now + CONFIG.SETTLE_AFTER_S * 1000;
+    }
+  } else if (state.phase === PHASE.WAVE_SETTLE) {
+    if (now > state.waveSettleEndsAt) {
+      state.phase = PHASE.WAVE_ANNOUNCE;   // placeholder; scoreWave decides what's next
+      state.waveAnnounceEndsAt = Infinity;
+      scoreWave();
+    }
+  }
+
+  // remove anything that fell into the void (except tracked tower blocks, kept for bookkeeping)
+  for (const b of [...Composite.allBodies(engine.world)]) {
+    if (!b.isStatic && b.position.y > KILL_Y + 200) {
+      Composite.remove(engine.world, b);
+      state.balls = state.balls.filter(x => x !== b);
+    }
+  }
+
+  if (state.phase !== PHASE.MENU && state.phase !== PHASE.OVER) {
+    Engine.update(engine, dt);
+  }
+
+  render(now);
+  updateHud();
+  requestAnimationFrame(loop);
+}
+
+/* ============================================================
+   RENDER
+   ============================================================ */
+function render(now) {
+  ctx.save();
+  ctx.scale(viewScale * devicePixelRatio, viewScale * devicePixelRatio);
+  ctx.clearRect(0, 0, W, H);
+
+  // faint notebook lines on the paper
+  ctx.strokeStyle = "rgba(120,140,180,0.12)";
+  ctx.lineWidth = 1;
+  for (let y = 40; y < H; y += 36) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+
+  // danger threshold line
+  ctx.setLineDash([7, 7]);
+  ctx.strokeStyle = "rgba(200,80,70,0.4)";
+  ctx.beginPath();
+  ctx.moveTo(40, PLATFORM_TOP - CONFIG.MIN_TOWER_PX);
+  ctx.lineTo(W - 40, PLATFORM_TOP - CONFIG.MIN_TOWER_PX);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = "rgba(200,80,70,0.5)";
+  ctx.font = "11px sans-serif";
+  ctx.fillText("stay above this line!", 44, PLATFORM_TOP - CONFIG.MIN_TOWER_PX - 5);
+
+  // bodies (compound tetrominoes are drawn cell by cell)
+  const ghostOverlap = currentBlockOverlaps();
+  for (const b of Composite.allBodies(engine.world)) {
+    if (b === platform) { drawSketchBody(b, "rgba(150,120,80,0.85)", 2.6); continue; }
+    if (b === pillar)   { drawSketchBody(b, "rgba(150,120,80,0.55)", 2.2); continue; }
+    if (b.isGhost) {
+      // held block: translucent ghost, red when overlapping the tower
+      ctx.globalAlpha = 0.55;
+      for (const part of solidParts(b)) {
+        drawSketchBody(part, ghostOverlap ? "rgba(220,90,80,0.5)" : b.renderFill);
+      }
+      ctx.globalAlpha = 1;
+      continue;
+    }
+    for (const part of solidParts(b)) {
+      drawSketchBody(part, b.renderFill || "rgba(180,180,180,0.7)");
+    }
+  }
+
+  // placement timer arc around the current block
+  if (state.phase === PHASE.PLACING && state.currentBlock) {
+    const remain = Math.max(0, (state.placeDeadline - performance.now()) / (CONFIG.PLACE_TIME_S * 1000));
+    const p = state.currentBlock.position;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 52, -Math.PI / 2, -Math.PI / 2 + remain * Math.PI * 2);
+    ctx.strokeStyle = remain < 0.25 ? "rgba(210,80,70,0.8)" : "rgba(58,53,48,0.45)";
+    ctx.lineWidth = 3;
+    ctx.stroke();
+  }
+
+  // wind streaks
+  if (state.phase === PHASE.WAVE_ACTIVE && state.waveType.id === "wind" && state.windGust > 0.15) {
+    ctx.strokeStyle = `rgba(100,130,170,${0.25 * state.windGust})`;
+    ctx.lineWidth = 1.6;
+    for (let i = 0; i < 8; i++) {
+      const y = 80 + ((now / 3 + i * 83) % (H - 200));
+      const x = ((now / (2.2 - state.windGust)) * state.windDir + i * 167) % (W + 160);
+      const sx = state.windDir > 0 ? x - 80 : W - x + 80;
+      ctx.beginPath();
+      ctx.moveTo(sx, y);
+      ctx.quadraticCurveTo(sx + 25 * state.windDir, y - 4, sx + 50 * state.windDir, y);
+      ctx.stroke();
+    }
+  }
+
+  // quake rumble text
+  if (state.phase === PHASE.WAVE_ACTIVE && state.waveType.id === "quake") {
+    const shake = Math.random() * 2;
+    ctx.fillStyle = "rgba(58,53,48,0.35)";
+    ctx.font = "16px inherit";
+    ctx.fillText("rumble rumble…", W / 2 - 60 + shake, H - 30 + shake);
+  }
+
+  ctx.restore();
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

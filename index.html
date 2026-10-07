@@ -200,7 +200,8 @@ const CONFIG = {
   // "push": the held block is solid and can gently nudge the tower
   // "ghost": the held block passes through everything until it is dropped
   PLACEMENT_MODE  : "push",
-  NUDGE_STRENGTH  : 0.5,    // push mode: max push while touching, x the held block's weight
+  NUDGE_STRENGTH  : 0.8,    // push mode: max push while touching, x the held block's weight
+  NUDGE_SPEED     : 1.8,    // push mode: px per physics step while touching the tower
 };
 
 /* ============================================================
@@ -525,7 +526,6 @@ let stepsSinceHeldContact = Infinity;
 const GRAVITY_PER_MASS = engine.gravity.y * engine.gravity.scale;
 const STEP_SQ = PHYSICS_STEP_MS * PHYSICS_STEP_MS;   // matter: dv = F / m * dt^2
 const FREE_SPEED = 9;          // px per step in open air
-const NUDGE_SPEED = 1.2;       // px per step when touching / right next to the tower
 const SLOWDOWN_PER_PX = 0.2;   // speed cap shrinks with the gap to the tower
 const FREE_STRENGTH = 3;       // x weight, enough to brake before reaching the tower
 // Resting contacts flicker on and off between steps. Treating the block as
@@ -571,8 +571,8 @@ function holdStep() {
 
   // speed limit shrinks near the tower, so the block arrives gently; the
   // force limit stays high until contact so it can still brake in time
-  const maxSpeed = touching ? NUDGE_SPEED
-    : Math.max(NUDGE_SPEED, Math.min(FREE_SPEED, gapToTower(block) * SLOWDOWN_PER_PX));
+  const maxSpeed = touching ? CONFIG.NUDGE_SPEED
+    : Math.max(CONFIG.NUDGE_SPEED, Math.min(FREE_SPEED, gapToTower(block) * SLOWDOWN_PER_PX));
   const maxForce = (touching ? CONFIG.NUDGE_STRENGTH : FREE_STRENGTH) * weight;
 
   // steer the velocity towards the finger, then pick the force that gets

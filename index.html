@@ -137,6 +137,66 @@
   }
   .overlay button:active { transform: translateY(2px) rotate(-1deg); box-shadow: none; }
   .small-note { font-size: 12px; opacity: 0.65; margin-top: 16px; }
+  /* the settings link is secondary to Play, so it gets a quieter look */
+  .overlay .settings-btn {
+    font-size: 16px;
+    padding: 6px 18px;
+    margin-top: 16px;
+    background: #fffdf5;
+    box-shadow: 2px 3px 0 rgba(58,53,48,0.35);
+    transform: rotate(1deg);
+  }
+  .overlay .settings-btn:active { transform: translateY(2px) rotate(1deg); }
+
+  /* ---------- settings modal ---------- */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: rgba(25, 22, 20, 0.55);
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+  }
+  /* without blur support, darken more so the modal still stands out */
+  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .modal-backdrop { background: rgba(25, 22, 20, 0.8); }
+  }
+  .modal-backdrop.hidden { display: none; }
+  .modal-card {
+    width: 100%;
+    max-width: 340px;
+    padding: 20px 22px 18px;
+    background: var(--paper);
+    color: var(--ink);
+    text-align: center;
+    border: 3px solid var(--ink);
+    border-radius: 16px 22px 14px 20px / 20px 14px 22px 16px;
+    box-shadow: 4px 5px 0 rgba(0,0,0,0.35);
+    transform: rotate(-0.6deg);
+  }
+  .modal-card h2 { font-size: 28px; margin-bottom: 8px; transform: rotate(-1.5deg); }
+  .modal-card p { font-size: 15px; margin: 10px 0; }
+  .modal-card .hidden { display: none; }
+  .modal-card button {
+    font-family: inherit;
+    font-size: 18px;
+    padding: 8px 20px;
+    margin: 6px 4px 0;
+    background: #fffdf5;
+    color: var(--ink);
+    border: 2.5px solid var(--ink);
+    border-radius: 12px 18px 14px 16px / 16px 12px 18px 14px;
+    box-shadow: 2px 3px 0 rgba(58,53,48,0.4);
+    cursor: pointer;
+  }
+  .modal-card button:active { transform: translateY(2px); box-shadow: none; }
+  .modal-card button.danger { background: #f3a59c; }
+  .modal-card .close-btn { margin-top: 18px; background: #ffd76e; }
+  .modal-card .status { font-weight: bold; }
 </style>
 </head>
 <body>
@@ -163,6 +223,7 @@
        to rotate &middot; drop before the timer runs out!</p>
     <div class="scores" id="start-scores"></div>
     <button id="btn-start">Play</button>
+    <button class="settings-btn">&#9881;&#xFE0E; Settings</button>
     <div class="small-note">works offline &middot; physics by matter.js</div>
   </div>
 
@@ -172,6 +233,25 @@
     <p id="end-detail"></p>
     <div class="scores" id="end-scores"></div>
     <button id="btn-again">Play again</button>
+    <button class="settings-btn">&#9881;&#xFE0E; Settings</button>
+  </div>
+
+  <div id="settings-modal" class="modal-backdrop hidden"
+       role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-card">
+      <h2 id="settings-title">Settings</h2>
+      <p>High scores are only saved on this device.</p>
+      <div id="reset-ask">
+        <button id="btn-reset-scores" class="danger">Reset high scores</button>
+      </div>
+      <div id="reset-confirm" class="hidden">
+        <p>Delete all high scores? This can't be undone.</p>
+        <button id="btn-reset-yes" class="danger">Yes, reset</button>
+        <button id="btn-reset-no">Keep them</button>
+      </div>
+      <p id="reset-done" class="status hidden">High scores cleared &#10003;</p>
+      <button id="btn-settings-close" class="close-btn">Close</button>
+    </div>
   </div>
 </div>
 
@@ -641,6 +721,7 @@ canvas.addEventListener("wheel", e => {
 // buttons and R/E snap tetrominoes by 90 degrees; the wheel still fine-tunes
 const ROTATE_STEP = CONFIG.BLOCK_STYLE === "tetromino" ? Math.PI / 2 : 0.25;
 window.addEventListener("keydown", e => {
+  if (settingsOpen) return;   // keys belong to the settings dialog while it is open
   if (e.key === "r" || e.key === "ArrowRight") rotateCurrent(ROTATE_STEP);
   if (e.key === "e" || e.key === "ArrowLeft") rotateCurrent(-ROTATE_STEP);
   if (e.key === " " || e.key === "Enter") dropCurrentBlock();
@@ -846,17 +927,85 @@ function resetGame() {
 }
 
 document.getElementById("btn-start").addEventListener("click", () => {
+  if (settingsOpen) return;
   document.getElementById("start-overlay").classList.add("hidden");
   resetGame();
   spawnBlock();
 });
 document.getElementById("btn-again").addEventListener("click", () => {
+  if (settingsOpen) return;
   document.getElementById("end-overlay").classList.add("hidden");
   resetGame();
   spawnBlock();
 });
-document.getElementById("start-scores").innerHTML =
-  "<b>Best towers</b><br>" + scoresHtml(loadScores(), null);
+function showStartScores() {
+  document.getElementById("start-scores").innerHTML =
+    "<b>Best towers</b><br>" + scoresHtml(loadScores(), null);
+}
+showStartScores();
+
+/* ============================================================
+   SETTINGS MODAL (reset high scores)
+   ============================================================ */
+const settingsModal = document.getElementById("settings-modal");
+const resetAsk = document.getElementById("reset-ask");
+const resetConfirm = document.getElementById("reset-confirm");
+const resetDone = document.getElementById("reset-done");
+let settingsOpen = false;
+let settingsOpener = null;   // the Settings button to hand focus back to
+
+// Everything behind the dialog. Making it inert keeps keyboard focus (and
+// taps) inside the dialog, so the game can't be started underneath it.
+const behindSettings = [...document.getElementById("game-wrap").children]
+  .filter(element => element !== settingsModal);
+
+// The step's button that should get keyboard focus, since the button
+// that had focus is hidden when the step changes
+const FOCUS_FOR_STEP = { ask: "btn-reset-scores", confirm: "btn-reset-no", done: "btn-settings-close" };
+
+function showResetStep(step) {
+  resetAsk.classList.toggle("hidden", step !== "ask");
+  resetConfirm.classList.toggle("hidden", step !== "confirm");
+  resetDone.classList.toggle("hidden", step !== "done");
+  document.getElementById(FOCUS_FOR_STEP[step]).focus();
+}
+
+function openSettings(e) {
+  settingsOpener = e.currentTarget;
+  settingsOpen = true;
+  for (const element of behindSettings) element.inert = true;
+  settingsModal.classList.remove("hidden");
+  const hasScores = loadScores().length > 0;
+  resetDone.textContent = hasScores ? "" : "No high scores saved yet.";
+  showResetStep(hasScores ? "ask" : "done");
+}
+
+function closeSettings() {
+  settingsOpen = false;
+  for (const element of behindSettings) element.inert = false;
+  settingsModal.classList.add("hidden");
+  if (settingsOpener) settingsOpener.focus();
+}
+
+function resetHighScores() {
+  // storage can be unavailable (private mode); the game must not crash
+  try { localStorage.removeItem(CONFIG.HIGHSCORE_KEY); } catch {}
+  showStartScores();
+  document.getElementById("end-scores").innerHTML = "<b>Best towers</b><br>" + scoresHtml([], null);
+  resetDone.textContent = "High scores cleared \u2713";
+  showResetStep("done");
+}
+
+for (const button of document.querySelectorAll(".settings-btn")) {
+  button.addEventListener("click", openSettings);
+}
+document.getElementById("btn-reset-scores").addEventListener("click", () => showResetStep("confirm"));
+document.getElementById("btn-reset-yes").addEventListener("click", resetHighScores);
+document.getElementById("btn-reset-no").addEventListener("click", () => showResetStep("ask"));
+document.getElementById("btn-settings-close").addEventListener("click", closeSettings);
+// tapping the dimmed area outside the card also closes it
+settingsModal.addEventListener("click", e => { if (e.target === settingsModal) closeSettings(); });
+window.addEventListener("keydown", e => { if (settingsOpen && e.key === "Escape") closeSettings(); });
 
 /* ============================================================
    BANNER + HUD
@@ -979,7 +1128,9 @@ function loop(now) {
     stepPhysics(frameMs);
   }
 
-  render(now);
+  // The menus hide the canvas anyway, and under the blurred settings backdrop
+  // every redraw would force the browser to re-blur the whole screen.
+  if (!settingsOpen) render(now);
   updateHud();
   requestAnimationFrame(loop);
 }

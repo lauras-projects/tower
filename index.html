@@ -159,8 +159,8 @@
     <h1>Wobbly Towers</h1>
     <p>Stack tetromino blocks on a tiny platform, then survive
        10 waves of wind, earthquakes and cannonballs!</p>
-    <p><b>Drag</b> to move &middot; <b>scroll / R</b> or buttons to rotate &middot;
-       drop before the timer runs out!</p>
+    <p><b>Drag</b> to move (and gently nudge the tower) &middot; <b>scroll / R</b> or buttons
+       to rotate &middot; drop before the timer runs out!</p>
     <div class="scores" id="start-scores"></div>
     <button id="btn-start">Play</button>
     <div class="small-note">works offline &middot; physics by matter.js</div>
@@ -197,6 +197,10 @@ const CONFIG = {
   WAVE_DURATION_S : 6,      // active part of each wave
   SETTLE_AFTER_S  : 2.5,    // calm-down time after a wave before scoring
   HIGHSCORE_KEY   : "wobblyTowersTop3",
+  // "push": the held block is solid and can gently nudge the tower
+  // "ghost": the held block passes through everything until it is dropped
+  PLACEMENT_MODE  : "push",
+  NUDGE_STRENGTH  : 0.5,    // push mode: max push while touching, x the held block's weight
 };
 
 /* ============================================================
@@ -433,10 +437,19 @@ function setGhost(block, ghost) {
 
 function spawnBlock() {
   const block = makeBlock(W / 2, 90);
-  Body.setStatic(block, true);
-  // while being placed the block is a "ghost": it collides with nothing,
-  // so dragging it through your tower can never knock it over
+  if (CONFIG.PLACEMENT_MODE === "ghost") {
+    // while being placed the block is a "ghost": it collides with nothing,
+    // so dragging it through your tower can never knock it over
+    Body.setStatic(block, true);
+  }
+  // In push mode the block also starts as a ghost, but only until it is clear
+  // of everything (see holdStep). A solid block appearing inside a very tall
+  // tower would otherwise be shoved out violently.
   setGhost(block, true);
+  holdTarget.x = block.position.x;
+  holdTarget.y = block.position.y;
+  holdTarget.angle = block.angle;
+  stepsSinceHeldContact = Infinity;
   state.currentBlock = block;
   state.placeDeadline = performance.now() + CONFIG.PLACE_TIME_S * 1000;
   Composite.add(engine.world, block);
@@ -462,15 +475,18 @@ function currentBlockOverlaps() {
 function dropCurrentBlock() {
   if (state.phase !== PHASE.PLACING || !state.currentBlock) return;
   const block = state.currentBlock;
-  // lift the ghost out of any overlap, so turning collisions back on
-  // can never make blocks explode apart
+  // lift a ghost out of any overlap, so turning collisions back on can never
+  // make blocks explode apart. A solid held block (push mode) only ever rests
+  // against things, and lifting it would hop it through blocks above it.
   let guard = 0;
-  while (currentBlockOverlaps() && guard++ < 200) {
+  while (block.isGhost && currentBlockOverlaps() && guard++ < 200) {
     Body.setPosition(block, { x: block.position.x, y: block.position.y - 4 });
   }
   setGhost(block, false);            // solid again
-  Body.setStatic(block, false);
+  if (block.isStatic) Body.setStatic(block, false);
+  // let go calmly: a block released mid-swipe should fall, not be thrown
   Body.setVelocity(block, { x: 0, y: 0 });
+  Body.setAngularVelocity(block, 0);
   state.placedBlocks.push(block);
   state.currentBlock = null;
   state.phase = PHASE.SETTLING;
@@ -480,8 +496,113 @@ function dropCurrentBlock() {
 }
 
 function rotateCurrent(deltaRad) {
-  if (state.phase === PHASE.PLACING && state.currentBlock) {
-    Body.setAngle(state.currentBlock, state.currentBlock.angle + deltaRad);
+  if (state.phase !== PHASE.PLACING || !state.currentBlock) return;
+  const block = state.currentBlock;
+  if (CONFIG.PLACEMENT_MODE === "ghost") {
+    Body.setAngle(block, block.angle + deltaRad);
+    return;
+  }
+  // push mode: snapping would swing the corners straight into the tower,
+  // so holdStep spins the block towards this angle with limited torque.
+  // Keep the target within half a turn of the block, so mashing rotate
+  // while it is wedged can't wind up a big spin for later.
+  const MAX_WINDUP = Math.PI;
+  holdTarget.angle = Math.max(block.angle - MAX_WINDUP,
+                     Math.min(block.angle + MAX_WINDUP, holdTarget.angle + deltaRad));
+}
+
+/* ============================================================
+   HELD BLOCK CONTROL (push mode)
+   The held block is a normal dynamic body steered by forces, so the
+   solver treats its pushes like any other contact. Forces are capped:
+   generous in open air so it follows the finger snappily, but only
+   CONFIG.NUDGE_STRENGTH x its weight once it touches something, and it
+   slows down as it approaches the tower so it arrives gently.
+   ============================================================ */
+const holdTarget = { x: 0, y: 0, angle: 0 };
+let stepsSinceHeldContact = Infinity;
+
+const GRAVITY_PER_MASS = engine.gravity.y * engine.gravity.scale;
+const STEP_SQ = PHYSICS_STEP_MS * PHYSICS_STEP_MS;   // matter: dv = F / m * dt^2
+const FREE_SPEED = 9;          // px per step in open air
+const NUDGE_SPEED = 1.2;       // px per step when touching / right next to the tower
+const SLOWDOWN_PER_PX = 0.2;   // speed cap shrinks with the gap to the tower
+const FREE_STRENGTH = 3;       // x weight, enough to brake before reaching the tower
+// Resting contacts flicker on and off between steps. Treating the block as
+// "touching" for a short while after the last contact stops the force limit
+// from flipping to full strength on every flicker, which pulsed the tower.
+const CONTACT_MEMORY_STEPS = 10;
+
+// distance between the held block's bounding box and the nearest solid one
+function gapToTower(block) {
+  let gap = Infinity;
+  for (const other of [platform, ...state.placedBlocks]) {
+    if (other.position.y > KILL_Y) continue;
+    const dx = Math.max(0, other.bounds.min.x - block.bounds.max.x, block.bounds.min.x - other.bounds.max.x);
+    const dy = Math.max(0, other.bounds.min.y - block.bounds.max.y, block.bounds.min.y - other.bounds.max.y);
+    gap = Math.min(gap, Math.hypot(dx, dy));
+  }
+  return gap;
+}
+
+// distance from the centre to the farthest corner: rotating at w rad per step
+// moves that corner w * radius px per step
+function holdRadius(block) {
+  let radius = 0;
+  for (const part of solidParts(block)) {
+    for (const v of part.vertices) {
+      radius = Math.max(radius, Math.hypot(v.x - block.position.x, v.y - block.position.y));
+    }
+  }
+  return radius;
+}
+
+function clampMagnitude(vec, max) {
+  const length = Math.hypot(vec.x, vec.y);
+  return length > max ? { x: vec.x / length * max, y: vec.y / length * max } : vec;
+}
+
+// called before every physics step while placing in push mode
+function holdStep() {
+  const block = state.currentBlock;
+  if (block.isGhost && !currentBlockOverlaps()) setGhost(block, false);
+  const touching = !block.isGhost && stepsSinceHeldContact < CONTACT_MEMORY_STEPS;
+  const weight = block.mass * GRAVITY_PER_MASS;
+
+  // speed limit shrinks near the tower, so the block arrives gently; the
+  // force limit stays high until contact so it can still brake in time
+  const maxSpeed = touching ? NUDGE_SPEED
+    : Math.max(NUDGE_SPEED, Math.min(FREE_SPEED, gapToTower(block) * SLOWDOWN_PER_PX));
+  const maxForce = (touching ? CONFIG.NUDGE_STRENGTH : FREE_STRENGTH) * weight;
+
+  // steer the velocity towards the finger, then pick the force that gets
+  // there in about two steps, capped so contacts stay gentle
+  const toTarget = { x: holdTarget.x - block.position.x, y: holdTarget.y - block.position.y };
+  const wantedVelocity = clampMagnitude({ x: toTarget.x * 0.25, y: toTarget.y * 0.25 }, maxSpeed);
+  const steer = clampMagnitude({
+    x: (wantedVelocity.x - block.velocity.x) * block.mass / STEP_SQ * 0.5,
+    y: (wantedVelocity.y - block.velocity.y) * block.mass / STEP_SQ * 0.5,
+  }, maxForce);
+  // gravity is cancelled separately, so carrying the block costs no push budget
+  Body.applyForce(block, block.position, { x: steer.x, y: steer.y - weight });
+
+  // the same speed limit applies to the block's farthest corner while it spins
+  const maxSpin = maxSpeed / Math.max(holdRadius(block), CONFIG.TETRO_CELL);
+  const wantedSpin = Math.max(-maxSpin, Math.min(maxSpin, (holdTarget.angle - block.angle) * 0.25));
+  const maxTorque = maxForce * CONFIG.TETRO_CELL;   // the same gentle push, one cell from the centre
+  const torque = (wantedSpin - block.angularVelocity) * block.inertia / STEP_SQ * 0.5;
+  block.torque += Math.max(-maxTorque, Math.min(maxTorque, torque));
+}
+
+// called after every physics step: is the held block resting on or pushing anything?
+function updateHeldContact() {
+  const block = state.currentBlock;
+  stepsSinceHeldContact++;
+  for (const pair of engine.pairs.list) {
+    if (pair.isActive && (pair.bodyA.parent === block || pair.bodyB.parent === block)) {
+      stepsSinceHeldContact = 0;
+      return;
+    }
   }
 }
 
@@ -502,8 +623,9 @@ canvas.addEventListener("pointerdown", e => {
   dragging = true;
   canvas.setPointerCapture(e.pointerId);
   const finger = canvasPos(e);
-  const block = state.currentBlock.position;
-  dragOffset = { x: block.x - finger.x, y: block.y - finger.y };
+  // in push mode the block may still be catching up, so anchor to where it is heading
+  const anchor = CONFIG.PLACEMENT_MODE === "ghost" ? state.currentBlock.position : holdTarget;
+  dragOffset = { x: anchor.x - finger.x, y: anchor.y - finger.y };
 });
 canvas.addEventListener("pointermove", e => {
   if (!dragging || state.phase !== PHASE.PLACING) return;
@@ -528,7 +650,12 @@ function moveBlockTo(p) {
   if (!state.currentBlock) return;
   const x = Math.max(30, Math.min(W - 30, p.x));
   const y = Math.max(50, Math.min(PLATFORM_TOP - 30, p.y));
-  Body.setPosition(state.currentBlock, { x, y });
+  if (CONFIG.PLACEMENT_MODE === "ghost") {
+    Body.setPosition(state.currentBlock, { x, y });
+  } else {
+    holdTarget.x = x;
+    holdTarget.y = y;
+  }
 }
 
 const controls = document.getElementById("controls");
@@ -785,7 +912,11 @@ function stepPhysics(frameMs) {
   let steps = 0;
   while (physicsTimeBank >= PHYSICS_STEP_MS && steps < MAX_STEPS_PER_FRAME) {
     if (state.phase === PHASE.WAVE_ACTIVE) waveStep(PHYSICS_STEP_MS);
+    const holding = state.phase === PHASE.PLACING && state.currentBlock &&
+                    CONFIG.PLACEMENT_MODE === "push";
+    if (holding) holdStep();
     Engine.update(engine, PHYSICS_STEP_MS);
+    if (holding) updateHeldContact();
     physicsTimeBank -= PHYSICS_STEP_MS;
     steps++;
   }
@@ -913,13 +1044,14 @@ function render(now) {
   if (state.phase === PHASE.PLACING && state.currentBlock) drawDropGuide(state.currentBlock);
 
   // bodies (compound tetrominoes are drawn cell by cell)
-  const ghostOverlap = state.phase === PHASE.PLACING && currentBlockOverlaps();
+  const ghostOverlap = state.phase === PHASE.PLACING && state.currentBlock &&
+                       state.currentBlock.isGhost && currentBlockOverlaps();
   for (const b of Composite.allBodies(engine.world)) {
     if (b === platform) { drawSketchBody(b, "rgba(150,120,80,0.85)", 2.6); continue; }
     if (b === pillar)   { drawSketchBody(b, "rgba(150,120,80,0.55)", 2.2); continue; }
-    if (b.isGhost) {
-      // held block: translucent ghost, red when overlapping the tower
-      ctx.globalAlpha = 0.55;
+    if (b === state.currentBlock) {
+      // held block: see-through (more so while it is a ghost), red when overlapping
+      ctx.globalAlpha = b.isGhost ? 0.55 : 0.8;
       for (const part of solidParts(b)) {
         drawSketchBody(part, ghostOverlap ? "rgba(220,90,80,0.5)" : b.renderFill);
       }

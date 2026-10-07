@@ -210,19 +210,36 @@ const ctx = canvas.getContext("2d");
 // Logical playfield; scaled to fit the window (portrait, bus-friendly)
 const W = 420, H = 700;
 let viewScale = 1;
+let pixelRatio = 1;
+
+// Static paper (notebook lines + danger line) is drawn once per resize into
+// an offscreen canvas; repainting it from scratch every frame was wasted work.
+const backgroundCanvas = document.createElement("canvas");
 
 function resize() {
   viewScale = Math.min(window.innerWidth / W, window.innerHeight / H);
-  canvas.width  = Math.round(W * viewScale * devicePixelRatio);
-  canvas.height = Math.round(H * viewScale * devicePixelRatio);
+  // 3x screens triple the pixels to fill for no visible gain on sketchy lines,
+  // so cap the ratio to keep older phones at a steady frame rate
+  pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width  = Math.round(W * viewScale * pixelRatio);
+  canvas.height = Math.round(H * viewScale * pixelRatio);
   canvas.style.width  = (W * viewScale) + "px";
   canvas.style.height = (H * viewScale) + "px";
+  backgroundCanvas.width = canvas.width;
+  backgroundCanvas.height = canvas.height;
+  drawBackground();
 }
-window.addEventListener("resize", resize);
-resize();
 
 const engine = Engine.create();
 engine.gravity.y = 1;
+
+// The simulation always advances in fixed 60 Hz steps, whatever the screen's
+// refresh rate. Feeding matter.js the raw frame time (8 ms on 120 Hz phones,
+// 30+ ms whenever an older phone hiccups) makes resting contacts sink in and
+// get shoved back out, which is what made towers jump for no reason.
+const PHYSICS_STEP_MS = 1000 / 60;
+const MAX_STEPS_PER_FRAME = 3;   // after a long stall, slow down rather than spiral
+let physicsTimeBank = 0;
 
 // Platform: a narrow ledge floating above the bottom of the screen
 const PLATFORM_Y = H - 120;
@@ -230,9 +247,11 @@ const platformBaseX = W / 2;
 const platform = Bodies.rectangle(
   platformBaseX, PLATFORM_Y,
   CONFIG.PLATFORM_WIDTH, CONFIG.PLATFORM_HEIGHT,
-  // matter combines frictionStatic between touching bodies with max(),
-  // so a grippy platform holds blocks firmly - and shakes them properly
-  { isStatic: true, friction: 1.0, frictionStatic: 10, label: "platform" }
+  // Keep frictionStatic modest: matter.js uses the max() of the two bodies,
+  // and a huge value (this used to be 10) lets its approximate friction solver
+  // overshoot on blocks standing on end, flicking them across the screen.
+  // friction 1.0 alone already grips well enough for the earthquake waves.
+  { isStatic: true, friction: 1.0, frictionStatic: 1.0, label: "platform" }
 );
 // A thin pillar under the platform, just for looks (also static)
 const pillar = Bodies.rectangle(
@@ -260,12 +279,11 @@ function freshState() {
     settleQuietSince: null,
     wave: 0,
     waveType: null,
-    waveEndsAt: 0,
+    waveElapsedMs: 0,
     waveSettleEndsAt: 0,
     score: 0,
     balls: [],
     windDir: 1,
-    windPhase: 0,
     gameOverReason: "",
     won: false,
   };
@@ -277,16 +295,26 @@ state = freshState();
    The "boiling" wobble: every body gets per-vertex jitter that
    is regenerated a few times per second, like a hand redrawing.
    ============================================================ */
-const wobbleCache = new Map();   // body.id -> {offsets, until}
+// The wobble is purely cosmetic: offsets are added to the drawn outline only,
+// body.vertices (what matter.js collides with) are never touched.
+// A few jitter frames are made once per body and cycled, like a hand-drawn
+// animation loop, so drawing allocates nothing per frame (less GC stutter).
+const WOBBLE_FRAMES = 3;
+const WOBBLE_FRAME_MS = 180;
+const WOBBLE_PX = 3;
+let wobbleFrame = 0;
+
 function getWobble(body, nVerts) {
-  let w = wobbleCache.get(body.id);
-  if (!w || w.until < performance.now() || w.offsets.length < nVerts * 2) {
-    const offsets = [];
-    for (let i = 0; i < nVerts * 2; i++) offsets.push((Math.random() - 0.5) * 3);
-    w = { offsets, until: performance.now() + 180 };
-    wobbleCache.set(body.id, w);
+  // stored on the body itself so it is garbage-collected along with it
+  if (!body.wobbleFrames) {
+    body.wobbleFrames = [];
+    for (let f = 0; f < WOBBLE_FRAMES; f++) {
+      const offsets = new Float32Array(nVerts * 2);
+      for (let i = 0; i < offsets.length; i++) offsets[i] = (Math.random() - 0.5) * WOBBLE_PX;
+      body.wobbleFrames.push(offsets);
+    }
   }
-  return w.offsets;
+  return body.wobbleFrames[wobbleFrame];
 }
 
 function sketchPath(verts, off, pass) {
@@ -458,7 +486,10 @@ function rotateCurrent(deltaRad) {
 }
 
 // pointer input
+// Dragging is relative: the block keeps its distance from the finger instead
+// of jumping underneath it, so a thumb on a phone never hides the block.
 let dragging = false;
+let dragOffset = { x: 0, y: 0 };
 function canvasPos(e) {
   const rect = canvas.getBoundingClientRect();
   return {
@@ -470,12 +501,17 @@ canvas.addEventListener("pointerdown", e => {
   if (state.phase !== PHASE.PLACING) return;
   dragging = true;
   canvas.setPointerCapture(e.pointerId);
-  moveBlockTo(canvasPos(e));
+  const finger = canvasPos(e);
+  const block = state.currentBlock.position;
+  dragOffset = { x: block.x - finger.x, y: block.y - finger.y };
 });
 canvas.addEventListener("pointermove", e => {
-  if (dragging && state.phase === PHASE.PLACING) moveBlockTo(canvasPos(e));
+  if (!dragging || state.phase !== PHASE.PLACING) return;
+  const finger = canvasPos(e);
+  moveBlockTo({ x: finger.x + dragOffset.x, y: finger.y + dragOffset.y });
 });
 canvas.addEventListener("pointerup", () => { dragging = false; });
+canvas.addEventListener("pointercancel", () => { dragging = false; });
 canvas.addEventListener("wheel", e => {
   e.preventDefault();
   rotateCurrent(e.deltaY > 0 ? 0.12 : -0.12);
@@ -533,23 +569,35 @@ function startWave() {
 
 function activateWave() {
   state.phase = PHASE.WAVE_ACTIVE;
-  state.waveEndsAt = performance.now() + CONFIG.WAVE_DURATION_S * 1000;
+  // waves run on simulation time (not the wall clock) so forces, quake motion
+  // and the wave length all stay in step with the physics, even if frames drop
+  state.waveElapsedMs = 0;
   state.windDir = Math.random() < 0.5 ? -1 : 1;
-  state.windPhase = 0;
-  state.nextBallAt = performance.now() + 400;
+  state.nextBallAtMs = 400;
   // difficulty 0..1 across all waves
   state.intensity = state.wave / CONFIG.MAX_WAVES;
 }
 
-function waveTick(dtMs) {
-  const t = performance.now();
+// 0 -> 1 over the first and last moments of a wave, so the quake platform
+// starts from rest and glides back home instead of jumping into position
+function waveEnvelope(elapsedMs) {
+  const RAMP_MS = 600;
+  const remainingMs = CONFIG.WAVE_DURATION_S * 1000 - elapsedMs;
+  const ramp = Math.max(0, Math.min(1, elapsedMs / RAMP_MS, remainingMs / RAMP_MS));
+  return ramp * ramp * (3 - 2 * ramp);   // smoothstep
+}
+
+// Called once per fixed physics step: matter.js clears applied forces after
+// every Engine.update, so wind has to be re-applied on each step.
+function waveStep(stepMs) {
+  state.waveElapsedMs += stepMs;
+  const t = state.waveElapsedMs;
   const k = state.intensity;
 
   if (state.waveType.id === "wind") {
     // gusts: sine envelope with random direction flips
-    state.windPhase += dtMs / 1000;
     if (Math.random() < 0.004) state.windDir *= -1;
-    const gust = Math.max(0, Math.sin(state.windPhase * 2.2));
+    const gust = Math.max(0, Math.sin(t / 1000 * 2.2));
     // express wind as a fraction of gravity so it stays fair:
     // peak gust ~0.2x gravity in wave 1, ramping to ~0.5x in wave 10
     // (tested: an average tower survives to ~wave 5-6, late waves are deadly)
@@ -568,16 +616,16 @@ function waveTick(dtMs) {
     // through friction to the blocks (a teleporting platform has zero
     // velocity and shakes nothing). Curve tested: a sturdy tower survives
     // early quakes, wave 10 levels it.
-    const amp = 2 + k * 6;
+    const amp = (2 + k * 6) * waveEnvelope(t);
     const freq = 1 + k * 1.4;
     const offset = Math.sin(t / 1000 * freq * Math.PI) * amp;
     Body.setPosition(platform, { x: platformBaseX + offset, y: PLATFORM_Y }, true);
     Body.setPosition(pillar, { x: platformBaseX + offset, y: PLATFORM_Y + 60 });
   }
 
-  if (state.waveType.id === "balls" && t > state.nextBallAt) {
+  if (state.waveType.id === "balls" && t > state.nextBallAtMs) {
     const interval = 1800 - k * 1100;
-    state.nextBallAt = t + interval;
+    state.nextBallAtMs = t + interval;
     const fromLeft = Math.random() < 0.5;
     const r = 8 + Math.random() * 6 + k * 6;
     const startX = fromLeft ? -20 : W + 20;
@@ -695,20 +743,27 @@ function showBanner(text, ms = 1500) {
   bannerTimer = setTimeout(() => banner.classList.remove("show"), ms);
 }
 
+const hudLeft = document.getElementById("hud-left");
+const hudRight = document.getElementById("hud-right");
+
+// writing textContent forces a layout pass even when nothing changed,
+// which adds up at 60 fps on slow phones
+function setText(element, text) {
+  if (element.textContent !== text) element.textContent = text;
+}
+
 function updateHud() {
-  const left = document.getElementById("hud-left");
-  const right = document.getElementById("hud-right");
-  right.textContent = `score ${state.score}`;
+  setText(hudRight, `score ${state.score}`);
+  let leftText = "";
   if (state.phase === PHASE.PLACING) {
     const remain = Math.max(0, (state.placeDeadline - performance.now()) / 1000);
-    left.textContent = `block ${state.blocksPlaced + 1}/${CONFIG.BLOCKS_TO_PLACE} · ${remain.toFixed(1)}s`;
+    leftText = `block ${state.blocksPlaced + 1}/${CONFIG.BLOCKS_TO_PLACE} · ${remain.toFixed(1)}s`;
   } else if (state.phase >= PHASE.WAVE_ANNOUNCE && state.phase <= PHASE.WAVE_SETTLE) {
-    left.textContent = `wave ${state.wave}/${CONFIG.MAX_WAVES} · ${px2m(towerHeightPx())} m`;
+    leftText = `wave ${state.wave}/${CONFIG.MAX_WAVES} · ${px2m(towerHeightPx())} m`;
   } else if (state.phase === PHASE.SETTLING) {
-    left.textContent = "settling…";
-  } else {
-    left.textContent = "";
+    leftText = "settling…";
   }
+  setText(hudLeft, leftText);
 }
 
 /* ============================================================
@@ -725,9 +780,24 @@ function allQuiet() {
 /* ============================================================
    MAIN LOOP
    ============================================================ */
+function stepPhysics(frameMs) {
+  physicsTimeBank += frameMs;
+  let steps = 0;
+  while (physicsTimeBank >= PHYSICS_STEP_MS && steps < MAX_STEPS_PER_FRAME) {
+    if (state.phase === PHASE.WAVE_ACTIVE) waveStep(PHYSICS_STEP_MS);
+    Engine.update(engine, PHYSICS_STEP_MS);
+    physicsTimeBank -= PHYSICS_STEP_MS;
+    steps++;
+  }
+  // the phone could not keep up: drop the backlog instead of catching up later
+  if (steps === MAX_STEPS_PER_FRAME) physicsTimeBank = Math.min(physicsTimeBank, PHYSICS_STEP_MS);
+}
+
 let lastT = performance.now();
 function loop(now) {
-  const dt = Math.min(32, now - lastT);
+  // rAF's timestamp can be slightly older than performance.now() on the
+  // first frame, and a backgrounded tab returns with a huge gap; clamp both
+  const frameMs = Math.max(0, Math.min(100, now - lastT));
   lastT = now;
 
   // --- phase logic ---
@@ -753,8 +823,7 @@ function loop(now) {
   } else if (state.phase === PHASE.WAVE_ANNOUNCE) {
     if (now > state.waveAnnounceEndsAt) activateWave();
   } else if (state.phase === PHASE.WAVE_ACTIVE) {
-    waveTick(dt);
-    if (now > state.waveEndsAt) {
+    if (state.waveElapsedMs >= CONFIG.WAVE_DURATION_S * 1000) {
       endWaveCleanup();
       state.phase = PHASE.WAVE_SETTLE;
       state.waveSettleEndsAt = now + CONFIG.SETTLE_AFTER_S * 1000;
@@ -776,7 +845,7 @@ function loop(now) {
   }
 
   if (state.phase !== PHASE.MENU && state.phase !== PHASE.OVER) {
-    Engine.update(engine, dt);
+    stepPhysics(frameMs);
   }
 
   render(now);
@@ -787,32 +856,51 @@ function loop(now) {
 /* ============================================================
    RENDER
    ============================================================ */
-function render(now) {
-  ctx.save();
-  ctx.scale(viewScale * devicePixelRatio, viewScale * devicePixelRatio);
-  ctx.clearRect(0, 0, W, H);
+function drawBackground() {
+  const bg = backgroundCanvas.getContext("2d");
+  bg.setTransform(viewScale * pixelRatio, 0, 0, viewScale * pixelRatio, 0, 0);
+  bg.fillStyle = "#f6f1e3";
+  bg.fillRect(0, 0, W, H);
 
-  // faint notebook lines on the paper
-  ctx.strokeStyle = "rgba(120,140,180,0.12)";
-  ctx.lineWidth = 1;
-  for (let y = 40; y < H; y += 36) {
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
-  }
+  // faint notebook lines on the paper, batched into a single stroke
+  bg.strokeStyle = "rgba(120,140,180,0.12)";
+  bg.lineWidth = 1;
+  bg.beginPath();
+  for (let y = 40; y < H; y += 36) { bg.moveTo(0, y); bg.lineTo(W, y); }
+  bg.stroke();
 
   // danger threshold line
-  ctx.setLineDash([7, 7]);
-  ctx.strokeStyle = "rgba(200,80,70,0.4)";
-  ctx.beginPath();
-  ctx.moveTo(40, PLATFORM_TOP - CONFIG.MIN_TOWER_PX);
-  ctx.lineTo(W - 40, PLATFORM_TOP - CONFIG.MIN_TOWER_PX);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.fillStyle = "rgba(200,80,70,0.5)";
-  ctx.font = "11px sans-serif";
-  ctx.fillText("stay above this line!", 44, PLATFORM_TOP - CONFIG.MIN_TOWER_PX - 5);
+  bg.setLineDash([7, 7]);
+  bg.strokeStyle = "rgba(200,80,70,0.4)";
+  bg.beginPath();
+  bg.moveTo(40, PLATFORM_TOP - CONFIG.MIN_TOWER_PX);
+  bg.lineTo(W - 40, PLATFORM_TOP - CONFIG.MIN_TOWER_PX);
+  bg.stroke();
+  bg.setLineDash([]);
+  bg.fillStyle = "rgba(200,80,70,0.5)";
+  bg.font = "11px sans-serif";
+  bg.fillText("stay above this line!", 44, PLATFORM_TOP - CONFIG.MIN_TOWER_PX - 5);
+}
+
+function render(now) {
+  wobbleFrame = Math.floor(now / WOBBLE_FRAME_MS) % WOBBLE_FRAMES;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(backgroundCanvas, 0, 0);
+  ctx.save();
+  ctx.scale(viewScale * pixelRatio, viewScale * pixelRatio);
+
+  // drop guide: faint lane from the held block down to the platform, so you
+  // can line it up with the tower even while your finger is on the screen
+  if (state.phase === PHASE.PLACING && state.currentBlock) {
+    const bounds = state.currentBlock.bounds;
+    ctx.fillStyle = "rgba(58,53,48,0.06)";
+    // a tall rotated block can reach below the platform top; draw nothing then
+    const laneHeight = Math.max(0, PLATFORM_TOP - bounds.max.y);
+    ctx.fillRect(bounds.min.x, bounds.max.y, bounds.max.x - bounds.min.x, laneHeight);
+  }
 
   // bodies (compound tetrominoes are drawn cell by cell)
-  const ghostOverlap = currentBlockOverlaps();
+  const ghostOverlap = state.phase === PHASE.PLACING && currentBlockOverlaps();
   for (const b of Composite.allBodies(engine.world)) {
     if (b === platform) { drawSketchBody(b, "rgba(150,120,80,0.85)", 2.6); continue; }
     if (b === pillar)   { drawSketchBody(b, "rgba(150,120,80,0.55)", 2.2); continue; }
@@ -860,13 +948,15 @@ function render(now) {
   if (state.phase === PHASE.WAVE_ACTIVE && state.waveType.id === "quake") {
     const shake = Math.random() * 2;
     ctx.fillStyle = "rgba(58,53,48,0.35)";
-    ctx.font = "16px inherit";
+    ctx.font = '16px "Comic Sans MS", "Chalkboard SE", cursive';
     ctx.fillText("rumble rumble…", W / 2 - 60 + shake, H - 30 + shake);
   }
 
   ctx.restore();
 }
 
+window.addEventListener("resize", resize);
+resize();
 requestAnimationFrame(loop);
 </script>
 </body>

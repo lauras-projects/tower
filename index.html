@@ -894,7 +894,9 @@ function render(now) {
   if (state.phase === PHASE.PLACING && state.currentBlock) {
     const bounds = state.currentBlock.bounds;
     ctx.fillStyle = "rgba(58,53,48,0.06)";
-    ctx.fillRect(bounds.min.x, bounds.max.y, bounds.max.x - bounds.min.x, PLATFORM_TOP - bounds.max.y);
+    // a tall rotated block can reach below the platform top; draw nothing then
+    const laneHeight = Math.max(0, PLATFORM_TOP - bounds.max.y);
+    ctx.fillRect(bounds.min.x, bounds.max.y, bounds.max.x - bounds.min.x, laneHeight);
   }
 
   // bodies (compound tetrominoes are drawn cell by cell)

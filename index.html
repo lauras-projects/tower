@@ -721,6 +721,7 @@ canvas.addEventListener("wheel", e => {
 // buttons and R/E snap tetrominoes by 90 degrees; the wheel still fine-tunes
 const ROTATE_STEP = CONFIG.BLOCK_STYLE === "tetromino" ? Math.PI / 2 : 0.25;
 window.addEventListener("keydown", e => {
+  if (settingsOpen) return;   // keys belong to the settings dialog while it is open
   if (e.key === "r" || e.key === "ArrowRight") rotateCurrent(ROTATE_STEP);
   if (e.key === "e" || e.key === "ArrowLeft") rotateCurrent(-ROTATE_STEP);
   if (e.key === " " || e.key === "Enter") dropCurrentBlock();
@@ -926,11 +927,13 @@ function resetGame() {
 }
 
 document.getElementById("btn-start").addEventListener("click", () => {
+  if (settingsOpen) return;
   document.getElementById("start-overlay").classList.add("hidden");
   resetGame();
   spawnBlock();
 });
 document.getElementById("btn-again").addEventListener("click", () => {
+  if (settingsOpen) return;
   document.getElementById("end-overlay").classList.add("hidden");
   resetGame();
   spawnBlock();
@@ -949,25 +952,39 @@ const resetAsk = document.getElementById("reset-ask");
 const resetConfirm = document.getElementById("reset-confirm");
 const resetDone = document.getElementById("reset-done");
 let settingsOpen = false;
+let settingsOpener = null;   // the Settings button to hand focus back to
+
+// Everything behind the dialog. Making it inert keeps keyboard focus (and
+// taps) inside the dialog, so the game can't be started underneath it.
+const behindSettings = [...document.getElementById("game-wrap").children]
+  .filter(element => element !== settingsModal);
+
+// The step's button that should get keyboard focus, since the button
+// that had focus is hidden when the step changes
+const FOCUS_FOR_STEP = { ask: "btn-reset-scores", confirm: "btn-reset-no", done: "btn-settings-close" };
 
 function showResetStep(step) {
   resetAsk.classList.toggle("hidden", step !== "ask");
   resetConfirm.classList.toggle("hidden", step !== "confirm");
   resetDone.classList.toggle("hidden", step !== "done");
+  document.getElementById(FOCUS_FOR_STEP[step]).focus();
 }
 
-function openSettings() {
+function openSettings(e) {
+  settingsOpener = e.currentTarget;
+  settingsOpen = true;
+  for (const element of behindSettings) element.inert = true;
+  settingsModal.classList.remove("hidden");
   const hasScores = loadScores().length > 0;
   resetDone.textContent = hasScores ? "" : "No high scores saved yet.";
   showResetStep(hasScores ? "ask" : "done");
-  settingsOpen = true;
-  settingsModal.classList.remove("hidden");
-  document.getElementById("btn-settings-close").focus();
 }
 
 function closeSettings() {
   settingsOpen = false;
+  for (const element of behindSettings) element.inert = false;
   settingsModal.classList.add("hidden");
+  if (settingsOpener) settingsOpener.focus();
 }
 
 function resetHighScores() {

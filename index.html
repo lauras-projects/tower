@@ -882,6 +882,25 @@ function drawBackground() {
   bg.fillText("stay above this line!", 44, PLATFORM_TOP - CONFIG.MIN_TOWER_PX - 5);
 }
 
+// Each cell casts its own lane, so the guide hugs the underside of uneven
+// pieces (S, Z, T...) instead of starting as one flat band at the lowest point.
+// A cell's lane is the convex hull of its corners plus those corners dropped
+// onto the platform, which also follows the slant of a fine-rotated block.
+function drawDropGuide(block) {
+  ctx.beginPath();
+  for (const part of solidParts(block)) {
+    const corners = part.vertices.map(v => ({ x: v.x, y: v.y }));
+    const droppedCorners = corners.map(v => ({ x: v.x, y: Math.max(v.y, PLATFORM_TOP) }));
+    const lane = Vertices.hull(corners.concat(droppedCorners));
+    lane.forEach((v, i) => (i === 0 ? ctx.moveTo(v.x, v.y) : ctx.lineTo(v.x, v.y)));
+    ctx.closePath();
+  }
+  // one fill for all lanes: the hulls share a winding direction, so where
+  // neighbouring lanes overlap they merge instead of drawing darker seams
+  ctx.fillStyle = "rgba(58,53,48,0.07)";
+  ctx.fill("nonzero");
+}
+
 function render(now) {
   wobbleFrame = Math.floor(now / WOBBLE_FRAME_MS) % WOBBLE_FRAMES;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -891,13 +910,7 @@ function render(now) {
 
   // drop guide: faint lane from the held block down to the platform, so you
   // can line it up with the tower even while your finger is on the screen
-  if (state.phase === PHASE.PLACING && state.currentBlock) {
-    const bounds = state.currentBlock.bounds;
-    ctx.fillStyle = "rgba(58,53,48,0.06)";
-    // a tall rotated block can reach below the platform top; draw nothing then
-    const laneHeight = Math.max(0, PLATFORM_TOP - bounds.max.y);
-    ctx.fillRect(bounds.min.x, bounds.max.y, bounds.max.x - bounds.min.x, laneHeight);
-  }
+  if (state.phase === PHASE.PLACING && state.currentBlock) drawDropGuide(state.currentBlock);
 
   // bodies (compound tetrominoes are drawn cell by cell)
   const ghostOverlap = state.phase === PHASE.PLACING && currentBlockOverlaps();
